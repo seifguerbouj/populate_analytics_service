@@ -3,13 +3,14 @@ import csv
 import argparse
 import os
 import logging
+import re
 import requests
 
 from dotenv import load_dotenv
 
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -17,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 
 def parse_arguments():
-    
     parser = argparse.ArgumentParser(description="")
     parser.add_argument(
         "csv_to_ingest", type=str, help="Path to the csv file to ingest"
@@ -30,7 +30,6 @@ def parse_arguments():
 
 
 def check_filter_values(row: dict, filter_values: list):
-    
     for filter_value in filter_values:
         if filter_value in row.values():
             return True
@@ -38,8 +37,18 @@ def check_filter_values(row: dict, filter_values: list):
 
 
 def read_csv_file(file_path: str, filter_values: list = None, batch_to_yield=20):
-    
-
+    valid_category = [
+        "contentinjection",
+        "drivebycompromise",
+        "exploitpublicfacingapplication",
+        "externalremoteservices",
+        "hardwareadditions",
+        "phishing",
+        "replicationthroughremovablemedia",
+        "supplychaincompromise",
+        "trustedrelationship",
+        "validaccounts",
+    ]
     batch = []
     # encoding because of Byte order mark
     with open(file=file_path, mode="r", encoding="utf8") as csvfile:
@@ -51,19 +60,27 @@ def read_csv_file(file_path: str, filter_values: list = None, batch_to_yield=20)
                 del row["source"]
             if "created_utc" in row:
                 row["asset"] = row.pop("asset_name")
+            if "id" in row:
+                row["id"] = int(row.pop("id"))
 
+            if "category" in row:
+                # remove any special caracters and spaces and lower the upper case letters
+                row["category"] = re.sub("[^A-Za-z]", "", row["category"]).lower()
+
+            if row["category"] not in valid_category:
+                logger.critical("category is not valid : %s", row["category"])
+                continue
             if filter_values is None or check_filter_values(
                 row=row, filter_values=filter_values
             ):
                 batch.append(row)
-                #better for performance because we don't need to read the whole file in memory
+                # better for performance because we don't need to read the whole file in memory
                 if len(batch) == batch_to_yield:
                     yield batch
                     batch = []
 
 
 def send_request_to_microservice(records):
-    
     microservice_path = os.getenv("MICROSERVICE_PATH")
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     try:
@@ -74,11 +91,13 @@ def send_request_to_microservice(records):
         logger.info(
             "Processed successfully record ID %s:", [record["id"] for record in records]
         )
+
         return True
     except requests.exceptions.HTTPError as err:
         logger.error(
             "Failed processing record ID %s: ", [record["id"] for record in records]
         )
+
         logger.error("http error: %s ", {err})
         return False
     except requests.exceptions.Timeout:
